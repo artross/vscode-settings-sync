@@ -1,32 +1,68 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# =============== БИНАРНИКИ И СБОРКИ ===============
+bin/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+build/
+dist/
 
-# Test binary, built with `go test -c`
-*.test
+# =============== ЗАВИСИМОСТИ ===============
+vendor/
 
-# Code coverage profiles and other test artifacts
+# =============== ЛОГИ И ВРЕМЕННЫЕ ФАЙЛЫ ===============
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+debug.log
+profile.pprof
+
+# =============== IDE И РЕДАКТОРЫ ===============
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# =============== СЕКРЕТЫ ===============
+# Критически важно! Никогда не коммитьте секреты
+.env
+*.env
+config/*.secret
+config/*.yaml
+config/*.json
+secrets/
+keys/
+*.pem
+*.key
+*.crt
+*.pfx
+passwords.txt
+credentials.json
+
+# =============== ТЕСТЫ И CODE-COVERAGE ===============
 *.out
 coverage.*
 *.coverprofile
 profile.cov
 
-# Dependency directories (remove the comment below to include it)
-# vendor/
+# =============== WINDOWS-СПЕЦИФИКА ===============
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# =============== КЭШ ===============
+.cache/
+go-build/
+
+# Test binary, built with `go test -c`
+*.test
 
 # Go workspace file
 go.work
 go.work.sum
-
-# env file
-.env
-
-# Editor/IDE
-# .idea/
-# .vscode/
