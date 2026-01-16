@@ -9,7 +9,7 @@
 
 Этот инструмент решает проблему синхронизации конфигурации VS Code (настройки, хоткеи, сниппеты) на машинах, которые **не имеют доступа в интернет** (где невозможно использовать облачный Settings Sync).
 
-Он запускает маленький HTTP-сервер на "мащине-источнике" и позволяет "машине-приемнику" забрать актуальные настройки одной командой.
+Он запускает маленький HTTP-сервер на "машине-источнике" и позволяет "машине-приемнику" забрать актуальные настройки одной командой.
 
 ---
 
@@ -29,8 +29,8 @@
 
 ### 1. Клонирование
 ```bash
-git clone https://github.com/ВАШ_НИК/vsc-sync.git
-cd vsc-sync
+git clone https://github.com/artross/vscode-settings-sync.git
+cd vscode-settings-sync
 ```
 
 ### 2. Сборка
@@ -38,15 +38,15 @@ cd vsc-sync
 
 *Для Windows (x64):*
 ```bash
-GOOS=windows GOARCH=amd64 go build -o vsc-sync.exe main.go
+GOOS=windows GOARCH=amd64 go build -o vscode-settings-sync.exe main.go
 ```
 
 *Для Linux (x64):*
 ```bash
-GOOS=linux GOARCH=amd64 go build -o vsc-sync main.go
+GOOS=linux GOARCH=amd64 go build -o vscode-settings-sync main.go
 ```
 
-3. Перенеси полученный файл (`vsc-sync.exe` или `vsc-sync`) на нужные машины.
+3. Перенеси полученный файл (`vscode-settings-sync.exe` или `vscode-settings-sync`) на нужные машины.
 
 ---
 
@@ -54,20 +54,28 @@ GOOS=linux GOARCH=amd64 go build -o vsc-sync main.go
 
 ### 1. Сервер (Машина с интернетом)
 Запусти утилиту на той машине, с которой хочешь перенести настройки.
+*По умолчанию используется порт 8080:*
 ```bash
-./vsc-sync server
+./vscode-settings-sync server
 ```
-*Сервер начнет слушать порт `8080`.*
+*Сервер начнет слушать порт `8080`. Если нужен другой порт:*
+```bash
+./vscode-settings-sync -port 9000 server
+```
 
 ### 2. Клиент (Машина без интернета)
 Запусти утилиту на машине, куда нужно обновить настройки.
 
 **⚠️ Важно:** Перед запуском закрой VS Code на этой машине!
 
+*Подключение к стандартному порту 8080:*
 ```bash
-./vsc-sync client <IP_АДРЕС_СЕРВЕРА>
+./vscode-settings-sync client <IP_АДРЕС_СЕРВЕРА>
 ```
-*Пример: `./vsc-sync client 192.168.1.50`*
+*Подключение к кастомному порту (например, 9000):*
+```bash
+./vscode-settings-sync -port 9000 client <IP_АДРЕС_СЕРВЕРА>
+```
 
 **Что сделает скрипт:**
 1. Подключится к серверу.
@@ -79,7 +87,11 @@ GOOS=linux GOARCH=amd64 go build -o vsc-sync main.go
 
 ## ⚙️ Конфигурация
 
-Вы можете изменить порт по умолчанию, отредактировав константу `PORT` в начале файла `main.go` и перекомпилировав проект.
+Вы можете указать любой свободный порт при запуске с помощью флага `-port`
+```bash
+vscode-settings-sync -port <НОМЕР_ПОРТА> server
+vscode-settings-sync -port <НОМЕР_ПОРТА> client <IP>
+```
 
 **Используемые пути к настройкам (автоопределение):**
 - **Windows:** `%APPDATA%\Code\User`
