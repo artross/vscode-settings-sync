@@ -140,6 +140,65 @@ func zipSource(source string) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
+// unzipDest распаковывает архив из reader в папку dest
+func unzipDest(reader io.Reader, dest string) error {
+	os.MkdirAll(dest, 0755)
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(reader)
+
+	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		return err
+	}
+
+	for _, f := range r.File {
+		fpath := filepath.Join(dest, f.Name)
+
+		// Защита от ZipSlip
+		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
+			return fmt.Errorf("недопустимый путь файла: %s", fpath)
+		}
+
+		if f.FileInfo().IsDir() {
+			os.MkdirAll(fpath, f.Mode())
+			continue
+		}
+
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			outFile.Close()
+			return err
+		}
+
+		_, err = io.Copy(outFile, rc)
+		outFile.Close()
+		rc.Close()
+
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func backupDir(path string) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+
+	timestamp := time.Now().Format("20060102-150405")
+	dest := path + "_backup_" + timestamp
+
+	fmt.Printf("Создание бэкапа текущих настроек в: %s\n", dest)
+	return os.Rename(path, dest)
+}
+
 // --- СЕРВЕРНАЯ ЧАСТЬ ---
 
 func runServer(port string) {
@@ -162,7 +221,6 @@ func runServer(port string) {
 
 	fmt.Println("========================================")
 	fmt.Printf("✅ Сервер успешно запущен!\n")
-	fmt.Printf("📡 Сервер слушает на всех интерфейсах\n")
 	fmt.Printf("⚠️  На клиенте используйте команду:\n")
 	fmt.Printf("> vscode-settings-sync client %s\n", displayAddr)
 	fmt.Println("========================================")
@@ -215,6 +273,43 @@ func runServer(port string) {
 
 	fmt.Println("✅ Сервер успешно остановлен.")
 
+}
+
+// --- КЛИЕНТСКАЯ ЧАСТЬ ---
+
+func runClient(serverIP string, port string) {
+	vscodePath, err := getVSCodePath()
+	if err != nil {
+		fmt.Printf("Ошибка поиска папки VS Code: %v\n", err)
+		return
+	}
+
+	url := fmt.Sprintf("http://%s:%s/sync", serverIP, port)
+	fmt.Printf("Подключение к серверу: %s\n", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		fmt.Printf("Ошибка подключения к серверу: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("Сервер вернул ошибку: %s\n", resp.Status)
+		return
+	}
+
+	if err := backupDir(vscodePath); err != nil {
+		fmt.Printf("Внимание: не удалось создать бэкап: %v\n", err)
+	}
+
+	fmt.Println("Распаковка полученных настроек...")
+	if err := unzipDest(resp.Body, vscodePath); err != nil {
+		fmt.Printf("Ошибка распаковки: %v\n", err)
+		return
+	}
+
+	fmt.Println("Синхронизация успешно завершена! Перезапустите VS Code.")
 }
 
 // --- MAIN ---
