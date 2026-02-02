@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,6 +49,53 @@ func getVSCodePath() (string, error) {
 	default:
 		return "", fmt.Errorf("неподдерживаемая ОС: %s", runtime.GOOS)
 	}
+}
+
+// getLocalIP ищет реальный локальный IPv4 адрес (LAN), отсекая VPN, Docker и отключенные интерфейсы.
+func getLocalIP() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	// Черный список имен для виртуальных интерфейсов
+	excludedPrefixes := []string{"docker", "br-", "veth", "virbr", "vboxnet"}
+
+	for _, iface := range interfaces {
+		// 1. Пропускаем отключенные интерфейсы, локалхост, VPN и PPPoE
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagPointToPoint != 0 {
+			continue
+		}
+
+		// 2. Фильтруем по имени (Docker, VirtualBox и т.д.)
+		// Дополнительная проверка на случай, если виртуалка не отмечена как P2P
+		skip := false
+		for _, prefix := range excludedPrefixes {
+			if strings.HasPrefix(iface.Name, prefix) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		// Если интерфейс подошел, берем его адрес
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok {
+				if ipnet.IP.To4() != nil {
+					return ipnet.IP.String()
+				}
+			}
+		}
+	}
+
+	return ""
 }
 
 // zipSource архивирует папку source в байтовый буфер
@@ -92,125 +140,73 @@ func zipSource(source string) (*bytes.Buffer, error) {
 	return buf, nil
 }
 
-// unzipDest распаковывает архив из reader в папку dest
-func unzipDest(reader io.Reader, dest string) error {
-	os.MkdirAll(dest, 0755)
-
-	buf := new(bytes.Buffer)
-	buf.ReadFrom(reader)
-
-	r, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	if err != nil {
-		return err
-	}
-
-	for _, f := range r.File {
-		fpath := filepath.Join(dest, f.Name)
-
-		// Защита от ZipSlip
-		if !strings.HasPrefix(fpath, filepath.Clean(dest)+string(os.PathSeparator)) {
-			return fmt.Errorf("недопустимый путь файла: %s", fpath)
-		}
-
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, f.Mode())
-			continue
-		}
-
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			outFile.Close()
-			return err
-		}
-
-		_, err = io.Copy(outFile, rc)
-		outFile.Close()
-		rc.Close()
-
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func backupDir(path string) error {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil
-	}
-
-	timestamp := time.Now().Format("20060102-150405")
-	dest := path + "_backup_" + timestamp
-
-	fmt.Printf("Создание бэкапа текущих настроек в: %s\n", dest)
-	return os.Rename(path, dest)
-}
-
 // --- СЕРВЕРНАЯ ЧАСТЬ ---
 
 func runServer(port string) {
+	// 1. Получаем путь к настройкам VS Code
 	vscodePath, err := getVSCodePath()
 	if err != nil {
 		fmt.Printf("Ошибка поиска папки VS Code: %v\n", err)
 		return
 	}
 
+	// 2. Получаем IP-адрес
 	localIP := getLocalIP()
-	var displayAddr string
-	if localIP != "" {
-		displayAddr = fmt.Sprintf("%s:%s", localIP, port)
-	} else {
-		displayAddr = fmt.Sprintf("localhost:%s", port)
+	if localIP == "" {
+		fmt.Printf("Ошибка при старте сервера: не определен ip-адрес для подключения")
+		return
 	}
+
+	// 3. Формируем красивую строку и выводим пользователю
+	displayAddr := fmt.Sprintf("%s:%s", localIP, port)
 
 	fmt.Println("========================================")
 	fmt.Printf("✅ Сервер успешно запущен!\n")
+	fmt.Printf("📡 Сервер слушает на всех интерфейсах\n")
 	fmt.Printf("⚠️  На клиенте используйте команду:\n")
 	fmt.Printf("> vscode-settings-sync client %s\n", displayAddr)
 	fmt.Println("========================================")
-	fmt.Println("Ожидание подключений... (Нажмите Ctrl+C для выхода)")
+	fmt.Println("Ожидание подключений...")
 
-	// 1. Настраиваем Хэндлер (как обычно)
+	// 4. Настраиваем HTTP-обработчик
 	http.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Только GET запросы", http.StatusMethodNotAllowed)
 			return
 		}
-		fmt.Println("Запрос на синхронизацию получен.")
+
+		fmt.Println("Запрос на синхронизацию получен. Подготовка архива...")
+
 		zipData, err := zipSource(vscodePath)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", "attachment; filename=vscode_settings.zip")
 		w.Write(zipData.Bytes())
+
 		fmt.Println("Архив отправлен.")
 	})
 
-	// 2. Создаем объект сервера (а не просто вызываем функцию)
+	// 5. Создаем сервер и запускаем в отдельной горутине
 	srv := &http.Server{Addr: ":" + port}
 
-	// 3. Запускаем сервер в отдельной горутине (фоновом режиме)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("Ошибка сервера: %v\n", err)
 		}
 	}()
 
-	// 4. Ожидаем сигнал завершения (Ctrl+C)
+	// 6. Ожидаем сигнал завершения (Ctrl+C)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit // Программа "замрет" здесь, пока не нажмешь Ctrl+C
 
-	fmt.Println("\n🛑 Остановлен сигнал завершения. Ждем завершения текущих загрузок...")
+	fmt.Println("\n🛑 Получен сигнал остановки сервера. Ждем завершения текущих загрузок...")
 
-	// 5. Даем серверу 5 секунд на закрытие всех текущих коннектов
+	// 7. Даем серверу 5 секунд на закрытие всех текущих коннектов
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
@@ -218,58 +214,19 @@ func runServer(port string) {
 	}
 
 	fmt.Println("✅ Сервер успешно остановлен.")
-}
 
-// --- КЛИЕНТСКАЯ ЧАСТЬ ---
-
-func runClient(serverIP string, port string) {
-	vscodePath, err := getVSCodePath()
-	if err != nil {
-		fmt.Printf("Ошибка поиска папки VS Code: %v\n", err)
-		return
-	}
-
-	url := fmt.Sprintf("http://%s:%s/sync", serverIP, port)
-	fmt.Printf("Подключение к серверу: %s\n", url)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Printf("Ошибка подключения к серверу: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("Сервер вернул ошибку: %s\n", resp.Status)
-		return
-	}
-
-	if err := backupDir(vscodePath); err != nil {
-		fmt.Printf("Внимание: не удалось создать бэкап: %v\n", err)
-	}
-
-	fmt.Println("Распаковка полученных настроек...")
-	if err := unzipDest(resp.Body, vscodePath); err != nil {
-		fmt.Printf("Ошибка распаковки: %v\n", err)
-		return
-	}
-
-	fmt.Println("Синхронизация успешно завершена! Перезапустите VS Code.")
 }
 
 // --- MAIN ---
 
 func main() {
-	// Определяем флаг для порта.
+	// Определяем флаг для порта
 	// flag.String возвращает *string (указатель).
 	portPtr := flag.String("port", DEFAULT_PORT, "Порт для работы сервера/клиента")
+	flag.Parse() // Парсим флаги, которые пользователь передал при запуске
 
-	// flag.Parse() разбирает переданные флаги.
-	// Все, что не флаг (например, server или client), остается в os.Args
-	flag.Parse()
-
-	// После flag.Parse os.Args содержит то, что осталось после удаления флагов.
-	// os.Args[0] - имя программы.
+	// После flag.Parse оставшиеся аргументы лежат в os.Args
+	// os.Args[0] - имя программы
 	// os.Args[1] - первая команда (server/client), если есть.
 	// os.Args[2] - вторая команда (IP), если есть.
 
@@ -288,7 +245,6 @@ func main() {
 
 	switch command {
 	case "server":
-		// Передаем *portPtr (значение по адресу), а не сам адрес
 		runServer(*portPtr)
 	case "client":
 		if len(os.Args) < 3 {
