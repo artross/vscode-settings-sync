@@ -204,34 +204,102 @@ func backupDir(path string) error {
 	return os.Rename(path, dest)
 }
 
+// --- ДЛЯ ВЕРСИИ 2.0 ---
+
+// shouldSkip определяет лишние элементы, которые не нужно архивировать
+func shouldSkip(path string) bool {
+	var skipDirs = map[string]bool{
+		"Cache":            true,
+		"CachedData":       true,
+		"Code Cache":       true,
+		"languagepacks":    true, // обычно не нужно переносить
+		"logs":             true,
+		"workspaceStorage": true, // СОХРАНЯЕМ КОНТЕКСТ КЛИЕНТА
+		"globalStorage":    true, // СОХРАНЯЕМ КОНТЕКСТ КЛИЕНТА
+	}
+
+	parts := strings.Split(path, string(filepath.Separator))
+	for _, part := range parts {
+		if skipDirs[part] {
+			return true
+		}
+	}
+	// Игнорируем сокеты и временные файлы БД
+	if strings.HasSuffix(path, ".sock") || strings.HasSuffix(path, "-journal") {
+		return true
+	}
+	return false
+}
+
+// addFolderToZip отправляет нужные файлы в поток архива
+//   - folderPath — откуда берем (абсолютный путь на диске)
+//   - zipPath — префикс внутри архива (например, "User" или "extensions")
+//   - archive — наш запущенный зип-райтер
+func addFolderToZip(folderPath string, zipPath string, archive *zip.Writer) error {
+	return filepath.WalkDir(folderPath, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Вычисляем путь внутри архива
+		relPath, _ := filepath.Rel(folderPath, path)
+		// Соединяем с префиксом (например, "User/settings.json")
+		entryName := filepath.Join(zipPath, relPath)
+
+		// Наш фильтр из предыдущего шага
+		if shouldSkip(relPath) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if d.IsDir() {
+			return nil
+		}
+
+		// Создаем запись в архиве
+		info, _ := d.Info()
+		header, _ := zip.FileInfoHeader(info)
+		header.Name = filepath.ToSlash(entryName) // ZIP всегда хочет "/" даже на Windows
+		header.Method = zip.Deflate
+
+		writer, err := archive.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+
+		// Читаем файл и льем напрямую в архив (в сетевой поток)
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		return err
+	})
+}
+
 // --- СЕРВЕРНАЯ ЧАСТЬ ---
 
 func runServer(port string) {
-	// 1. Получаем путь к настройкам VS Code
-	vscodePath, err := getVSCodePath()
-	if err != nil {
-		fmt.Printf("Ошибка поиска папки VS Code: %v\n", err)
-		return
-	}
-
-	// 2. Получаем IP-адрес
 	localIP := getLocalIP()
 	if localIP == "" {
 		fmt.Printf("Ошибка при старте сервера: не определен ip-адрес для подключения")
 		return
 	}
 
-	// 3. Формируем красивую строку и выводим пользователю
 	displayAddr := fmt.Sprintf("%s:%s", localIP, port)
 
 	fmt.Println("========================================")
 	fmt.Printf("✅ Сервер успешно запущен!\n")
-	fmt.Printf("⚠️  На клиенте используйте команду:\n")
+	fmt.Printf("На клиенте используйте команду:\n")
 	fmt.Printf("> vscode-settings-sync client %s\n", displayAddr)
 	fmt.Println("========================================")
 	fmt.Println("Ожидание подключений...")
 
-	// 4. Настраиваем HTTP-обработчик
+	// Настраиваем HTTP-обработчик
 	http.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Только GET запросы", http.StatusMethodNotAllowed)
@@ -240,20 +308,30 @@ func runServer(port string) {
 
 		fmt.Println("Запрос на синхронизацию получен. Подготовка архива...")
 
-		zipData, err := zipSource(vscodePath)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
+		// 1. Создаем архив, который пишет прямо в HTTP ответ,
+		// предварительно задав ему правильные заголовки
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", "attachment; filename=vscode_settings.zip")
-		w.Write(zipData.Bytes())
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		archive := zip.NewWriter(w)
 
-		fmt.Println("Архив отправлен.")
+		// ВАЖНО: сначала закрываем архив (записывается центральный каталог ZIP),
+		// а потом обработчик завершает HTTP-сессию.
+		defer archive.Close()
+
+		// 2. Добавляем папки по очереди
+		// Конфиги полетят в папку "User" внутри архива
+		userDir := filepath.Join(os.Getenv("APPDATA"), "Code", "User")
+		addFolderToZip(userDir, "User", archive)
+
+		// Плагины полетят в папку "extensions" внутри архива
+		extDir := filepath.Join(os.Getenv("USERPROFILE"), ".vscode", "extensions")
+		addFolderToZip(extDir, "extensions", archive)
+
+		fmt.Println("Архив передан.")
 	})
 
-	// 5. Создаем сервер и запускаем в отдельной горутине
+	// Создаем сервер и запускаем в отдельной горутине
 	srv := &http.Server{Addr: ":" + port}
 
 	go func() {
@@ -262,14 +340,14 @@ func runServer(port string) {
 		}
 	}()
 
-	// 6. Ожидаем сигнал завершения (Ctrl+C)
+	// Ожидаем сигнал завершения (Ctrl+C)
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit // Программа "замрет" здесь, пока не нажмешь Ctrl+C
 
 	fmt.Println("\n🛑 Получен сигнал остановки сервера. Ждем завершения текущих загрузок...")
 
-	// 7. Даем серверу 5 секунд на закрытие всех текущих коннектов
+	//  Даем серверу 5 секунд на закрытие всех текущих коннектов
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
